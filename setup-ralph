@@ -1,0 +1,121 @@
+#!/bin/bash
+# setup-ralph - Bootstrap Ralph in any project
+# Creates CLAUDE.md (with Ralph instructions) + progress.txt
+# Claude will interview you to create PRD.md
+#
+# Usage: setup-ralph
+# https://www.aihero.dev/getting-started-with-ralph
+
+set -e
+
+# Check if already initialized
+if [[ -f "CLAUDE.md" ]] && grep -q "Ralph Workflow" CLAUDE.md 2>/dev/null; then
+    echo "⚠️  Ralph already initialized in this directory."
+    echo -n "Reinitialize? This will overwrite CLAUDE.md (y/N) "
+    read -r response
+    [[ ! "$response" =~ ^[Yy]$ ]] && exit 0
+fi
+
+# Create CLAUDE.md with Ralph instructions
+cat > CLAUDE.md << 'CLAUDE_EOF'
+# Project Instructions
+
+## Ralph Workflow
+
+This project uses the **Ralph** workflow - an AI coding loop where you (Claude) work through tasks one at a time, committing after each.
+
+### How to Determine What to Do
+
+**Check for PRD.md first:**
+
+1. **If PRD.md is MISSING or EMPTY:**
+   → Interview the user to create it:
+   - Ask what they're building (be specific)
+   - Ask about tech stack preferences
+   - Ask about key features and requirements
+   - Break their vision into small tasks (~15-30 min each)
+   - Create PRD.md with prioritized task list (use `- [ ]` checkboxes)
+   - Ask if they want you to start implementing
+
+2. **If PRD.md EXISTS with INCOMPLETE tasks (has `- [ ]` items):**
+   → Follow the Ralph implementation loop:
+   - Read PRD.md and progress.txt
+   - Find the highest-priority incomplete task
+   - Implement ONLY that single task
+   - Run tests and type checks (MUST pass before committing)
+   - Mark task complete in PRD.md (`- [x]`)
+   - Append to progress.txt with timestamp
+   - Commit with descriptive message
+   - Ask if user wants to continue to next task
+
+3. **If PRD.md is COMPLETE (all tasks are `- [x]`):**
+   → Celebrate and offer next steps:
+   - Congratulate the user!
+   - Ask if they want to add more features
+   - If yes, interview them and add new tasks to PRD.md
+
+### Critical Rules
+
+- **ONE TASK AT A TIME** - Never work on multiple tasks in one iteration
+- **TESTS MUST PASS** - Run tests before every commit. Fix failures before committing.
+- **TYPE CHECKS MUST PASS** - Run type checks (tsc, mypy, etc.) before committing
+- **SMALL COMMITS** - Each commit = one completed task
+- **UPDATE PROGRESS** - Always append to progress.txt with what you did and when
+
+### Task Sizing Guide
+
+Good tasks (~15-30 min):
+- "Create login form component"
+- "Add API endpoint for user creation"
+- "Write tests for authentication service"
+
+Too big (break these down):
+- "Implement user authentication" → Break into: form, API, validation, session, tests
+- "Build the dashboard" → Break into: layout, widgets, data fetching, etc.
+
+### Progress Format
+
+When updating progress.txt, use this format:
+```
+[YYYY-MM-DD HH:MM] Completed: <task description>
+- <what you did>
+- <any notes or decisions made>
+```
+
+## Project-Specific Notes
+
+<!-- Add your project-specific context below -->
+<!-- Tech stack, coding conventions, files to avoid, etc. -->
+
+CLAUDE_EOF
+
+echo "✅ Created CLAUDE.md with Ralph workflow instructions"
+
+# Create progress.txt if it doesn't exist
+if [[ ! -f "progress.txt" ]]; then
+    touch progress.txt
+    echo "✅ Created progress.txt"
+else
+    echo "📝 progress.txt already exists (keeping it)"
+fi
+
+# Show status
+echo ""
+echo "🚀 Ralph initialized!"
+echo ""
+echo "┌─────────────────────────────────────────────────────────┐"
+echo "│  Next: Run 'claude' and describe what you want to build │"
+echo "│  Claude will interview you and create your PRD.md       │"
+echo "└─────────────────────────────────────────────────────────┘"
+echo ""
+
+if [[ -f "PRD.md" ]]; then
+    echo "📋 Existing PRD.md found - Claude will continue from there"
+else
+    echo "📋 No PRD.md yet - Claude will help you create one"
+fi
+
+if [[ ! -d ".git" ]]; then
+    echo ""
+    echo "💡 Tip: Run 'git init' first if you want Ralph to commit changes"
+fi
