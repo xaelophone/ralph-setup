@@ -4,7 +4,7 @@ Bootstrap [Ralph](https://www.aihero.dev/getting-started-with-ralph) in any proj
 
 ## What is Ralph?
 
-Ralph is a technique by [Matt Pocock](https://twitter.com/mattpocockuk) for running AI coding agents in a loop:
+Ralph is a technique created by [Geoffrey Huntley](https://ghuntley.com/ralph/) for running AI coding agents in a loop:
 
 1. You describe what you want to build
 2. Claude interviews you and creates a PRD (task list)
@@ -41,6 +41,23 @@ setup-ralph                 # Initialize Ralph
 claude                      # Start Claude Code
 ```
 
+### For Frontend Projects (Recommended)
+
+Enable browser tools for a visual feedback loop. **[Full setup guide →](https://code.claude.com/docs/en/chrome)**
+
+**Prerequisites:**
+- [Google Chrome](https://www.google.com/chrome/)
+- [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) (v1.0.36+)
+- Claude Code CLI (v2.0.73+) — run `claude update` to ensure latest
+- Paid Claude plan (Pro, Team, or Enterprise)
+
+```bash
+claude --chrome             # Start with Chrome integration
+# Or enable permanently: run /chrome → "Enable by default"
+```
+
+With Chrome enabled, Claude can verify UI changes in a real browser before committing—navigating pages, checking console errors, and testing interactions.
+
 Then tell Claude what you want to build. It will:
 1. **Interview you** about the project
 2. **Generate PRD.md** with small, prioritized tasks
@@ -68,10 +85,11 @@ Claude reads `CLAUDE.md` automatically and knows to:
 │  2. Pick the highest-priority incomplete task               │
 │  3. Implement ONLY that task                                │
 │  4. Run tests and type checks (must pass!)                  │
-│  5. Mark task complete in PRD.md                            │
-│  6. Update progress.txt with what was done                  │
-│  7. Commit changes                                          │
-│  8. Repeat until PRD complete                               │
+│  5. For UI work: verify in browser (if Chrome enabled)      │
+│  6. Mark task complete in PRD.md                            │
+│  7. Update progress.txt with what was done                  │
+│  8. Commit changes                                          │
+│  9. Repeat until PRD complete                               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -150,9 +168,9 @@ Every commit must:
 
 ## Credits
 
-- **Ralph concept**: [Matt Pocock](https://twitter.com/mattpocockuk)
-- **Original article**: [Getting Started with Ralph](https://www.aihero.dev/getting-started-with-ralph)
-- **Tips**: [11 Tips for AI Coding with Ralph](https://www.aihero.dev/tips-for-ai-coding-with-ralph-wiggum)
+- **Ralph creator**: [Geoffrey Huntley](https://ghuntley.com/ralph/)
+- **This implementation based on**: [Matt Pocock's guide](https://www.aihero.dev/getting-started-with-ralph) and [video walkthrough](https://www.youtube.com/watch?v=_IK18goX4X8)
+- **Additional tips**: [11 Tips for AI Coding with Ralph](https://www.aihero.dev/tips-for-ai-coding-with-ralph-wiggum)
 
 ## License
 
