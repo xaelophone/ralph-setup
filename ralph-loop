@@ -1,0 +1,610 @@
+#!/bin/bash
+#═══════════════════════════════════════════════════════════════════════════════
+# ralph-loop - Autonomous Claude Loop Runner
+#═══════════════════════════════════════════════════════════════════════════════
+#
+# A lightweight bash script that runs Claude autonomously through tasks.
+# No dependencies beyond bash and the `claude` CLI.
+#
+# HOW IT WORKS:
+#   1. Reads PRD.md to find incomplete 🤖 tasks
+#   2. Builds a prompt with context from progress.txt
+#   3. Runs Claude with --dangerously-skip-permissions
+#   4. Parses output for <promise>COMPLETE</promise> token
+#   5. When detected, continues to next task
+#   6. Stops when: all 🤖 tasks done, only 🧑 tasks remain, or max iterations
+#
+# KEY CONCEPTS:
+#   - Completion Token: Claude outputs <promise>COMPLETE</promise> when done
+#   - Session Persistence: .ralph-session.json tracks state for crash recovery
+#   - Lock Files: .ralph.lock prevents multiple instances, detects stale sessions
+#   - Context Injection: Recent progress.txt entries injected into prompts
+#
+# WHEN TO USE THIS vs ralph-tui:
+#   - ralph-loop: Headless/CI, minimal systems, zero dependencies, learning
+#   - ralph-tui:  Interactive work, fancy TUI, plugins, notifications
+#
+# Usage:
+#   ralph-loop                    # Run with defaults
+#   ralph-loop --max-iterations 5 # Limit iterations
+#   ralph-loop --resume           # Resume crashed session
+#   ralph-loop --status           # Show session status
+#
+# Learn more: https://github.com/subsy/ralph-tui (the full-featured version)
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -e
+
+#───────────────────────────────────────────────────────────────────────────────
+# Configuration
+#───────────────────────────────────────────────────────────────────────────────
+
+VERSION="2.0.0"
+MAX_ITERATIONS=100        # Maximum loop iterations before stopping
+RESTART_DELAY=3           # Seconds to wait between iterations
+CONTEXT_LINES=20          # Lines of progress.txt to inject into prompt
+
+# File paths
+PRD_FILE="PRD.md"
+PROGRESS_FILE="progress.txt"
+HANDOFF_FILE="HANDOFF.md"
+SESSION_FILE=".ralph-session.json"
+LOCK_FILE=".ralph.lock"
+LOG_DIR=".ralph-logs"
+
+# The magic token that signals task completion
+# Claude outputs this after finishing a task, and we detect it to continue
+COMPLETION_TOKEN="<promise>COMPLETE</promise>"
+BLOCKED_TOKEN="<promise>BLOCKED</promise>"
+
+# Terminal colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+#───────────────────────────────────────────────────────────────────────────────
+# Utility Functions
+#───────────────────────────────────────────────────────────────────────────────
+
+log_info()    { echo -e "${BLUE}ℹ${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+log_error()   { echo -e "${RED}✗${NC} $1"; }
+
+timestamp()       { date '+%Y-%m-%d %H:%M:%S'; }
+timestamp_short() { date '+%Y-%m-%d %H:%M'; }
+
+# Check if a process is still running (used for stale lock detection)
+is_process_running() {
+    kill -0 "$1" 2>/dev/null
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Session Management
+#───────────────────────────────────────────────────────────────────────────────
+# Sessions enable crash recovery. We store state in .ralph-session.json and
+# use .ralph.lock with PID to detect if another instance is running or crashed.
+
+create_session() {
+    local session_id
+    session_id=$(uuidgen 2>/dev/null || echo "session-$$-$(date +%s)")
+
+    cat > "$SESSION_FILE" << EOF
+{
+  "sessionId": "$session_id",
+  "startedAt": "$(timestamp)",
+  "updatedAt": "$(timestamp)",
+  "iteration": 0,
+  "tasksCompleted": 0,
+  "status": "running",
+  "workingDir": "$(pwd)",
+  "pid": $$
+}
+EOF
+
+    # Lock file contains PID for stale detection
+    cat > "$LOCK_FILE" << EOF
+{
+  "pid": $$,
+  "sessionId": "$session_id",
+  "timestamp": "$(timestamp)",
+  "hostname": "$(hostname)"
+}
+EOF
+
+    echo "$session_id"
+}
+
+update_session() {
+    local field=$1 value=$2
+    [[ ! -f "$SESSION_FILE" ]] && return
+
+    # Simple sed-based JSON update (works for our flat structure)
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+        sed -i.bak "s/\"$field\": [0-9]*/\"$field\": $value/" "$SESSION_FILE"
+    else
+        sed -i.bak "s/\"$field\": \"[^\"]*\"/\"$field\": \"$value\"/" "$SESSION_FILE"
+    fi
+    rm -f "${SESSION_FILE}.bak"
+
+    # Always update timestamp
+    sed -i.bak "s/\"updatedAt\": \"[^\"]*\"/\"updatedAt\": \"$(timestamp)\"/" "$SESSION_FILE"
+    rm -f "${SESSION_FILE}.bak"
+}
+
+get_session_field() {
+    [[ -f "$SESSION_FILE" ]] && grep "\"$1\"" "$SESSION_FILE" | sed 's/.*: *"\?\([^",}]*\)"\?.*/\1/'
+}
+
+# Returns: 0=stale session, 1=active session (error), 2=no lock (ok to proceed)
+check_stale_session() {
+    [[ ! -f "$LOCK_FILE" ]] && return 2
+
+    local locked_pid
+    locked_pid=$(grep '"pid"' "$LOCK_FILE" | sed 's/.*: *\([0-9]*\).*/\1/')
+
+    if [[ -n "$locked_pid" ]] && ! is_process_running "$locked_pid"; then
+        log_warning "Found stale session from crashed process (PID: $locked_pid)"
+        return 0  # Stale - can be recovered
+    elif [[ -n "$locked_pid" ]]; then
+        log_error "Another ralph-loop is already running (PID: $locked_pid)"
+        return 1  # Active - cannot proceed
+    fi
+    return 2  # No lock
+}
+
+clean_stale_session() {
+    rm -f "$LOCK_FILE"
+    log_success "Cleaned stale lock file"
+    [[ -f "$SESSION_FILE" ]] && update_session "status" "recovered"
+}
+
+end_session() {
+    update_session "status" "$1"
+    rm -f "$LOCK_FILE"
+}
+
+show_session_status() {
+    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}Ralph Session Status${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+
+    if [[ ! -f "$SESSION_FILE" ]]; then
+        echo -e "${DIM}No active session found${NC}"
+        return
+    fi
+
+    echo -e "Session ID:  ${BLUE}$(get_session_field sessionId)${NC}"
+    echo -e "Status:      ${GREEN}$(get_session_field status)${NC}"
+    echo -e "Started:     $(get_session_field startedAt)"
+    echo -e "Updated:     $(get_session_field updatedAt)"
+    echo -e "Iteration:   $(get_session_field iteration)"
+    echo -e "Completed:   $(get_session_field tasksCompleted) tasks"
+
+    if [[ -f "$LOCK_FILE" ]]; then
+        local locked_pid
+        locked_pid=$(grep '"pid"' "$LOCK_FILE" | sed 's/.*: *\([0-9]*\).*/\1/')
+        if is_process_running "$locked_pid"; then
+            echo -e "Process:     ${GREEN}Running (PID: $locked_pid)${NC}"
+        else
+            echo -e "Process:     ${RED}Crashed (PID: $locked_pid)${NC}"
+        fi
+    fi
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Task Management
+#───────────────────────────────────────────────────────────────────────────────
+# Tasks are read from PRD.md. We look for markdown checkboxes:
+#   - [ ] 🤖 Task for Claude (AI task)
+#   - [ ] 🧑 Task for human (skipped)
+#   - [x] Completed task
+
+count_tasks() {
+    [[ ! -f "$PRD_FILE" ]] && echo "0 0 0 0" && return
+
+    local incomplete complete ai_incomplete human_incomplete
+    incomplete=$(grep -c '^\- \[ \]' "$PRD_FILE" 2>/dev/null || echo "0")
+    complete=$(grep -c '^\- \[x\]' "$PRD_FILE" 2>/dev/null || echo "0")
+    ai_incomplete=$(grep '^\- \[ \]' "$PRD_FILE" 2>/dev/null | grep -c '🤖' || echo "0")
+    human_incomplete=$(grep '^\- \[ \]' "$PRD_FILE" 2>/dev/null | grep -c '🧑' || echo "0")
+
+    echo "$incomplete $complete $ai_incomplete $human_incomplete"
+}
+
+get_current_task() {
+    [[ ! -f "$PRD_FILE" ]] && return
+    # Get first incomplete AI task, strip the checkbox and emoji
+    grep '^\- \[ \].*🤖' "$PRD_FILE" 2>/dev/null | head -1 | \
+        sed 's/^- \[ \] //' | sed 's/🤖//' | xargs
+}
+
+# Determines if the loop should continue
+should_continue() {
+    read -r incomplete complete ai_incomplete human_incomplete <<< "$(count_tasks)"
+
+    # No PRD.md yet - continue so Claude can create one
+    [[ "$incomplete" == "0" && "$complete" == "0" ]] && return 0
+
+    # All tasks complete
+    if [[ "$incomplete" == "0" ]]; then
+        log_success "All tasks complete!"
+        return 1
+    fi
+
+    # No AI tasks remaining (only human tasks left)
+    if [[ "$ai_incomplete" == "0" ]]; then
+        log_warning "Only human (🧑) tasks remaining"
+        echo "Check HANDOFF.md for tasks that need your attention."
+        return 1
+    fi
+
+    return 0
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Context Injection
+#───────────────────────────────────────────────────────────────────────────────
+# We inject recent progress into the prompt so Claude maintains context
+# across iterations without re-reading the entire history.
+
+get_recent_progress() {
+    if [[ ! -f "$PROGRESS_FILE" || ! -s "$PROGRESS_FILE" ]]; then
+        echo "No previous progress recorded."
+        return
+    fi
+    # Get last N lines, cap at 4KB to avoid prompt bloat
+    tail -n "$CONTEXT_LINES" "$PROGRESS_FILE" | head -c 4000
+}
+
+build_prompt() {
+    local iteration=$1
+    local current_task
+    current_task=$(get_current_task)
+    local recent_progress
+    recent_progress=$(get_recent_progress)
+
+    cat << PROMPT_EOF
+You are running under ralph-loop (iteration $iteration).
+
+## Current Task
+${current_task:-"Check PRD.md for the next task or create one if missing."}
+
+## Recent Progress (Last Few Iterations)
+$recent_progress
+
+## Instructions
+1. Complete the current task (or the highest-priority 🤖 task in PRD.md)
+2. Run tests and type checks - they MUST pass
+3. Update PRD.md to mark the task complete (- [x])
+4. Append to progress.txt with what you did
+5. Commit with a descriptive message
+6. Output the completion token: <promise>COMPLETE</promise>
+
+IMPORTANT: You MUST output <promise>COMPLETE</promise> after completing each task.
+This signals the orchestrator to continue to the next task.
+
+If you encounter an error you cannot resolve after 3 attempts, explain the issue
+and output <promise>BLOCKED</promise> instead.
+
+Begin working on the task now.
+PROMPT_EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Claude Execution
+#───────────────────────────────────────────────────────────────────────────────
+# We run Claude and parse its output in real-time looking for completion tokens.
+# Output is displayed AND logged to .ralph-logs/iteration-N.log
+
+run_claude_iteration() {
+    local iteration=$1
+    local prompt
+    prompt=$(build_prompt "$iteration")
+    local log_file="$LOG_DIR/iteration-$iteration.log"
+
+    mkdir -p "$LOG_DIR"
+
+    echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
+    echo -e "${MAGENTA}CLAUDE OUTPUT (Iteration $iteration)${NC}"
+    echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
+
+    # Create named pipe for real-time output parsing
+    local pipe
+    pipe=$(mktemp -u)
+    mkfifo "$pipe"
+
+    # Background process reads output, displays it, logs it, and checks for tokens
+    (
+        while IFS= read -r line; do
+            echo "$line"                          # Display
+            echo "$line" >> "$log_file"           # Log
+
+            # Check for completion tokens
+            [[ "$line" == *"$COMPLETION_TOKEN"* ]] && touch "${log_file}.complete"
+            [[ "$line" == *"$BLOCKED_TOKEN"* ]] && touch "${log_file}.blocked"
+        done < "$pipe"
+    ) &
+    local parser_pid=$!
+
+    # Run Claude with prompt via stdin (avoids shell escaping issues)
+    set +e
+    echo "$prompt" | claude --dangerously-skip-permissions > "$pipe" 2>&1
+    local exit_code=$?
+    set -e
+
+    # Cleanup
+    wait $parser_pid 2>/dev/null || true
+    rm -f "$pipe"
+
+    echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
+
+    # Return result based on token detection
+    if [[ -f "${log_file}.complete" ]]; then
+        rm -f "${log_file}.complete"
+        return 0  # Task completed
+    elif [[ -f "${log_file}.blocked" ]]; then
+        rm -f "${log_file}.blocked"
+        return 2  # Task blocked
+    else
+        return 1  # No completion token (context exhausted or error)
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Progress Logging
+#───────────────────────────────────────────────────────────────────────────────
+
+log_iteration() {
+    local iteration=$1 status=$2 task=$3
+    {
+        echo ""
+        echo "[$(timestamp_short)] ralph-loop iteration $iteration: $status"
+        [[ -n "$task" ]] && echo "- Task: $task"
+    } >> "$PROGRESS_FILE"
+}
+
+write_handoff() {
+    local task=$1 log_file=$2
+    {
+        echo ""
+        echo "## Blocked Task ($(timestamp_short))"
+        echo "- Task: $task"
+        echo "- See log: $log_file"
+    } >> "$HANDOFF_FILE"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Display Functions
+#───────────────────────────────────────────────────────────────────────────────
+
+show_banner() {
+    echo -e "${GREEN}"
+    cat << 'BANNER'
+  ██████╗  █████╗ ██╗     ██████╗ ██╗  ██╗
+  ██╔══██╗██╔══██╗██║     ██╔══██╗██║  ██║
+  ██████╔╝███████║██║     ██████╔╝███████║
+  ██╔══██╗██╔══██║██║     ██╔═══╝ ██╔══██║
+  ██║  ██║██║  ██║███████╗██║     ██║  ██║
+  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝
+BANNER
+    echo -e "${NC}"
+    echo -e "  ${DIM}Autonomous Claude Loop v$VERSION${NC}"
+    echo -e "  ${DIM}Real-time completion detection enabled${NC}"
+    echo ""
+}
+
+show_status() {
+    local iteration=$1
+    read -r incomplete complete ai_incomplete human_incomplete <<< "$(count_tasks)"
+    local total=$((incomplete + complete))
+    local current_task
+    current_task=$(get_current_task)
+
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}Iteration $iteration${NC} of $MAX_ITERATIONS"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────────${NC}"
+
+    if [[ "$total" -gt 0 ]]; then
+        local pct=$((complete * 100 / total))
+        echo -e "Progress:    ${GREEN}$complete${NC}/$total tasks ($pct%)"
+        echo -e "Remaining:   ${YELLOW}$ai_incomplete${NC} 🤖 tasks, ${BLUE}$human_incomplete${NC} 🧑 tasks"
+    else
+        echo -e "Status:      ${YELLOW}No PRD.md found${NC}"
+    fi
+
+    [[ -n "$current_task" ]] && echo -e "Current:     ${MAGENTA}$current_task${NC}"
+
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+}
+
+show_summary() {
+    local session_id=$1
+    read -r incomplete complete ai_incomplete human_incomplete <<< "$(count_tasks)"
+
+    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}${BOLD}Ralph Loop Complete!${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}\n"
+    echo -e "Session:     ${DIM}$session_id${NC}"
+    echo -e "Completed:   ${GREEN}$complete${NC} tasks"
+    echo -e "Remaining:   ${YELLOW}$incomplete${NC} tasks"
+    echo -e "Iterations:  $iteration"
+
+    [[ -f "$HANDOFF_FILE" ]] && echo -e "\n${YELLOW}Check HANDOFF.md for tasks that need human attention.${NC}"
+
+    echo -e "\n${DIM}Logs saved to: $LOG_DIR/${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Signal Handling
+#───────────────────────────────────────────────────────────────────────────────
+
+cleanup() {
+    echo ""
+    log_warning "Interrupted by user"
+    log_iteration "$iteration" "interrupted" ""
+    end_session "interrupted"
+
+    read -r incomplete complete ai_incomplete human_incomplete <<< "$(count_tasks)"
+    echo -e "\nFinal Status:"
+    echo -e "  Completed: ${GREEN}$complete${NC} tasks"
+    echo -e "  Remaining: ${YELLOW}$incomplete${NC} tasks"
+    echo -e "  Iterations: $iteration\n"
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+#───────────────────────────────────────────────────────────────────────────────
+# Argument Parsing
+#───────────────────────────────────────────────────────────────────────────────
+
+RESUME_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --max-iterations) MAX_ITERATIONS="$2"; shift 2 ;;
+        --delay) RESTART_DELAY="$2"; shift 2 ;;
+        --resume) RESUME_MODE=true; shift ;;
+        --status) show_session_status; exit 0 ;;
+        --help|-h)
+            cat << HELP
+ralph-loop v$VERSION - Autonomous Claude Runner
+
+Usage: ralph-loop [options]
+
+Options:
+  --max-iterations N   Maximum iterations (default: 100)
+  --delay N            Seconds between restarts (default: 3)
+  --resume             Resume a crashed session
+  --status             Show current session status
+  --help, -h           Show this help
+
+Features:
+  • Real-time completion detection (<promise>COMPLETE</promise>)
+  • Session persistence with crash recovery
+  • Cross-iteration context injection
+  • Automatic task progression
+
+The loop continues until:
+  • All 🤖 tasks are complete
+  • Only 🧑 human tasks remain
+  • Max iterations reached
+  • You press Ctrl+C
+
+For a full-featured TUI, see: ralph-tui (bun install -g ralph-tui)
+HELP
+            exit 0
+            ;;
+        *) log_error "Unknown option: $1"; echo "Use --help for usage"; exit 1 ;;
+    esac
+done
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main Loop
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    show_banner
+
+    # Check prerequisites
+    if [[ ! -f "CLAUDE.md" ]]; then
+        log_error "CLAUDE.md not found"
+        echo "Run 'setup-ralph' first to initialize the ralph workflow."
+        exit 1
+    fi
+
+    # Check for existing session (disable set -e to capture return code)
+    set +e
+    check_stale_session
+    stale_status=$?
+    set -e
+
+    if [[ $stale_status -eq 0 ]]; then
+        # Stale session found
+        if [[ "$RESUME_MODE" == true ]]; then
+            clean_stale_session
+            iteration=$(get_session_field iteration)
+            session_id=$(get_session_field sessionId)
+            log_success "Resuming session $session_id from iteration $iteration"
+        else
+            log_warning "Found stale session. Use --resume to continue or delete .ralph.lock"
+            exit 1
+        fi
+    elif [[ $stale_status -eq 1 ]]; then
+        exit 1  # Another instance running
+    else
+        session_id=$(create_session)
+        iteration=0
+        log_success "Started new session: $session_id"
+    fi
+
+    # Main loop
+    local tasks_completed_this_run=0
+    local consecutive_failures=0
+
+    while [[ $iteration -lt $MAX_ITERATIONS ]]; do
+        ((iteration++))
+        update_session "iteration" "$iteration"
+
+        show_status "$iteration"
+
+        if ! should_continue; then
+            break
+        fi
+
+        local current_task
+        current_task=$(get_current_task)
+        log_info "Starting iteration $iteration..."
+        log_iteration "$iteration" "started" "$current_task"
+
+        # Run Claude and detect completion
+        run_claude_iteration "$iteration"
+        local result=$?
+
+        case $result in
+            0)  # Completion token detected
+                log_success "Task completed! (detected completion token)"
+                ((tasks_completed_this_run++))
+                update_session "tasksCompleted" "$tasks_completed_this_run"
+                consecutive_failures=0
+                echo ""
+                log_info "Continuing to next task in $RESTART_DELAY seconds..."
+                sleep "$RESTART_DELAY"
+                ;;
+            1)  # No completion token
+                ((consecutive_failures++))
+                log_warning "Claude stopped without completion token (attempt $consecutive_failures/3)"
+                if [[ $consecutive_failures -ge 3 ]]; then
+                    log_error "Too many consecutive failures. Stopping."
+                    log_iteration "$iteration" "failed" "Too many consecutive failures"
+                    break
+                fi
+                log_info "Restarting in $RESTART_DELAY seconds..."
+                sleep "$RESTART_DELAY"
+                ;;
+            2)  # Blocked token detected
+                log_warning "Task blocked! Claude encountered an unresolvable issue."
+                log_iteration "$iteration" "blocked" "$current_task"
+                write_handoff "$current_task" "$LOG_DIR/iteration-$iteration.log"
+                log_info "Documented in HANDOFF.md. Continuing to next task..."
+                sleep "$RESTART_DELAY"
+                ;;
+        esac
+        echo ""
+    done
+
+    end_session "completed"
+    show_summary "$session_id"
+}
+
+main

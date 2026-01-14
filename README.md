@@ -11,87 +11,159 @@ Ralph is a technique created by [Geoffrey Huntley](https://ghuntley.com/ralph/) 
 3. Claude implements tasks one at a time, committing after each
 4. You come back to working code
 
-## Installation
+## Quick Start
 
-### Option 1: Clone this repo
-
-```bash
-git clone https://github.com/xaelophone/ralph-setup.git ~/ralph-setup
-chmod +x ~/ralph-setup/setup-ralph
-
-# Add to PATH (in ~/.zshrc or ~/.bashrc)
-export PATH="$HOME/ralph-setup:$PATH"
-```
-
-### Option 2: Copy to existing scripts directory
+### 1. Install (one time)
 
 ```bash
-# If you already have ~/bin/ralph or similar
-curl -fsSL https://raw.githubusercontent.com/xaelophone/ralph-setup/main/setup-ralph -o ~/bin/ralph/setup-ralph
-chmod +x ~/bin/ralph/setup-ralph
+curl -fsSL https://raw.githubusercontent.com/xaelophone/ralph-setup/main/install.sh | bash
+exec $SHELL  # Reload PATH
 ```
 
-## Usage
+### 2a. New Project (start from scratch)
 
 ```bash
-# In any new or existing project
-cd my-project
-git init                    # If not already a git repo
-setup-ralph                 # Initialize Ralph
-claude                      # Start Claude Code
+mkdir my-new-app && cd my-new-app
+git init
+setup-ralph                # Creates CLAUDE.md + progress.txt
+claude                     # Claude will interview you and create PRD.md
+# Once PRD.md exists with tasks:
+ralph-loop                 # Run autonomously overnight
 ```
 
-### For Frontend Projects (Recommended)
-
-Enable browser tools for a visual feedback loop. **[Full setup guide →](https://code.claude.com/docs/en/chrome)**
-
-**Prerequisites:**
-- [Google Chrome](https://www.google.com/chrome/)
-- [Claude in Chrome extension](https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn) (v1.0.36+)
-- Claude Code CLI (v2.0.73+) — run `claude update` to ensure latest
-- Paid Claude plan (Pro, Team, or Enterprise)
+### 2b. Existing Project (add Ralph to existing code)
 
 ```bash
-claude --chrome             # Start with Chrome integration
-# Or enable permanently: run /chrome → "Enable by default"
+cd my-existing-project
+setup-ralph                # Creates CLAUDE.md + progress.txt
+
+# Option A: Let Claude analyze and create a PRD
+claude                     # Tell Claude what you want to build/fix
+                           # It will create PRD.md with tasks
+
+# Option B: Create PRD.md yourself with tasks, then run:
+ralph-loop                 # Claude works through your task list
 ```
 
-With Chrome enabled, Claude can verify UI changes in a real browser before committing—navigating pages, checking console errors, and testing interactions.
+### 3. Check Progress
 
-Then tell Claude what you want to build. It will:
-1. **Interview you** about the project
-2. **Generate PRD.md** with small, prioritized tasks
-3. **Implement tasks** one by one, committing after each
+Come back in the morning to find:
+- ✅ Completed tasks in `PRD.md`
+- 📝 Work log in `progress.txt`
+- 🧑 Human tasks listed in `HANDOFF.md` (if any)
 
-## How It Works
+## Tools Included
 
-`setup-ralph` creates two files:
+| Tool | Description |
+|------|-------------|
+| `setup-ralph` | Initializes a project with CLAUDE.md and progress.txt |
+| `ralph-loop` | Autonomous Claude runner with completion detection |
 
-| File | Purpose |
-|------|---------|
-| `CLAUDE.md` | Instructions for Claude (the Ralph workflow) |
-| `progress.txt` | Log of completed work |
+### setup-ralph
 
-Claude reads `CLAUDE.md` automatically and knows to:
-- **Interview you** if no PRD.md exists
-- **Implement tasks** if PRD.md has incomplete items
-- **Celebrate & offer next steps** if PRD.md is complete
+Creates the Ralph workflow files in your project:
 
-## The Ralph Cycle
+```bash
+setup-ralph
+# Creates:
+#   CLAUDE.md    - Instructions for Claude (the Ralph workflow)
+#   progress.txt - Log of completed work
+```
+
+### ralph-loop
+
+Runs Claude autonomously with real-time completion detection:
+
+```bash
+ralph-loop                    # Run with defaults
+ralph-loop --max-iterations 5 # Limit iterations
+ralph-loop --resume           # Resume crashed session
+ralph-loop --status           # Show session status
+```
+
+**Key features:**
+- 🔄 Automatic restart when Claude's context fills up
+- ✅ Detects `<promise>COMPLETE</promise>` token to continue to next task
+- 💾 Session persistence with crash recovery
+- 📝 Cross-iteration context injection
+- 🤖 Skips human tasks (🧑), works only on AI tasks (🤖)
+
+**Output example:**
+```
+  ██████╗  █████╗ ██╗     ██████╗ ██╗  ██╗
+  ██╔══██╗██╔══██╗██║     ██╔══██╗██║  ██║
+  ██████╔╝███████║██║     ██████╔╝███████║
+  ██╔══██╗██╔══██║██║     ██╔═══╝ ██╔══██║
+  ██║  ██║██║  ██║███████╗██║     ██║  ██║
+  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝
+
+  Autonomous Claude Loop v2.0.0
+
+═══════════════════════════════════════════════════════════════
+Iteration 3 of 100
+───────────────────────────────────────────────────────────────
+Progress:    5/12 tasks (41%)
+Remaining:   7 🤖 tasks, 3 🧑 tasks
+Current:     Implement user authentication
+═══════════════════════════════════════════════════════════════
+```
+
+## For a Full TUI: ralph-tui
+
+I was building my own terminal UI (`rwatch` in Go/Bubbletea) to support the core ralph loop when I came across [ralph-tui](https://github.com/subsy/ralph-tui) - a beautifully polished implementation that does everything I wanted and more. Rather than reinvent the wheel, I'm recommending it here:
+
+```bash
+# Install Bun first (if needed)
+curl -fsSL https://bun.sh/install | bash
+exec $SHELL
+
+# Install ralph-tui
+bun install -g ralph-tui
+
+# Run
+ralph-tui
+```
+
+**ralph-tui provides:**
+- 🎨 Beautiful React-based TUI
+- 🔌 Plugin system for different trackers (JSON, Beads)
+- 🔔 Desktop notifications
+- 📊 Subagent tracing (see Claude's tool calls)
+- 🔄 Session resume with full state
+
+**When to use which:**
+| Scenario | Use |
+|----------|-----|
+| Headless/CI, minimal dependencies | `ralph-loop` |
+| Interactive development, fancy UI | `ralph-tui` |
+
+> **Note:** The experimental `rwatch` Go code is still in this repo under `cmd/rwatch/` and `internal/` if you want to build your own native TUI. Run `make build` to compile it.
+
+## Task Markers
+
+Mark tasks in your PRD.md to control what runs autonomously:
+
+```markdown
+- [ ] 🤖 Create API endpoint     # Claude does this
+- [ ] 🧑 Set up AWS account      # Human does this (skipped)
+- [x] 🤖 Write database schema   # Already done
+```
+
+## The Completion Protocol
+
+`ralph-loop` and `ralph-tui` detect when Claude finishes a task using a special token:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  1. Read PRD.md (task list) and progress.txt (history)      │
-│  2. Pick the highest-priority incomplete task               │
-│  3. Implement ONLY that task                                │
-│  4. Run tests and type checks (must pass!)                  │
-│  5. For UI work: verify in browser (if Chrome enabled)      │
-│  6. Mark task complete in PRD.md                            │
-│  7. Update progress.txt with what was done                  │
-│  8. Commit changes                                          │
-│  9. Repeat until PRD complete                               │
-└─────────────────────────────────────────────────────────────┘
+<promise>COMPLETE</promise>
 ```
+
+Claude outputs this after:
+1. Implementing the task
+2. Passing tests
+3. Committing code
+4. Updating progress.txt
+
+This lets the loop know to continue to the next task automatically.
 
 ## Example PRD
 
@@ -100,31 +172,37 @@ Claude will create something like this:
 ```markdown
 # My App - PRD
 
-## Overview
-Building a CLI todo app in Python
+> **Legend:** 🤖 = AI task | 🧑 = Human task
 
 ## Tasks
-- [x] Set up project structure with pyproject.toml
-- [x] Create Todo dataclass model
-- [ ] Implement add command
-- [ ] Implement list command
-- [ ] Implement complete command
-- [ ] Add JSON persistence
-- [ ] Write tests
 
-## Technical Notes
-- Python 3.11+, Click for CLI, pytest for tests
+### Phase 1: Foundation
+- [x] 🤖 Set up project structure
+- [x] 🤖 Create data models
+- [ ] 🤖 Implement API endpoints
+- [ ] 🧑 Set up production database
+
+### Phase 2: Features
+- [ ] 🤖 Add authentication
+- [ ] 🤖 Create user dashboard
+- [ ] 🧑 Configure OAuth provider
 ```
 
-## Commands to Tell Claude
+## How It Works
 
-| You Say | Claude Does |
-|---------|-------------|
-| "Let's build X" | Interviews you, creates PRD |
-| "Continue" / "Next task" | Implements next incomplete task |
-| "What's left?" | Shows remaining tasks |
-| "Add feature Y" | Adds new tasks to PRD |
-| "Let's start fresh" | Archives old PRD, interviews for new one |
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Read PRD.md (task list) and progress.txt (history)      │
+│  2. Pick the highest-priority incomplete 🤖 task            │
+│  3. Implement ONLY that task                                │
+│  4. Run tests and type checks (must pass!)                  │
+│  5. Mark task complete in PRD.md                            │
+│  6. Update progress.txt with what was done                  │
+│  7. Commit changes                                          │
+│  8. Output <promise>COMPLETE</promise>                      │
+│  9. Loop detects token, continues to next task              │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Tips
 
@@ -139,38 +217,29 @@ Building a CLI todo app in Python
 - "Implement user authentication"
 - "Build the entire dashboard"
 
-### Test Requirements
+### Overnight Runs
 
-Every commit must:
-- ✅ Pass all existing tests
-- ✅ Pass type checks (if applicable)
-- ✅ Not break the build
+For best results running overnight:
 
-### When to Use Ralph
-
-**Good for:**
-- Greenfield projects
-- Feature implementations
-- Refactoring with clear goals
-
-**Not ideal for:**
-- Quick bug fixes (just ask directly)
-- Exploration/research
+1. Mark tasks clearly with 🤖 or 🧑
+2. Ensure tests exist and pass
+3. Run `ralph-loop` or `ralph-tui`
+4. Check HANDOFF.md in the morning for blocked/human tasks
 
 ## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
-| Claude doesn't follow workflow | Run `setup-ralph` again to recreate CLAUDE.md |
-| Tasks are too big | Ask Claude to "break this down into smaller tasks" |
-| Tests keep failing | Tell Claude "fix the tests before moving on" |
-| Want to start over | Delete PRD.md, tell Claude "let's plan something new" |
+| "CLAUDE.md not found" | Run `setup-ralph` first |
+| "Another ralph-loop running" | Delete `.ralph.lock` or use `--resume` |
+| Claude doesn't complete tasks | Add completion protocol to CLAUDE.md |
+| Tasks too big | Ask Claude to "break this down into smaller tasks" |
 
 ## Credits
 
 - **Ralph creator**: [Geoffrey Huntley](https://ghuntley.com/ralph/)
-- **This implementation based on**: [Matt Pocock's guide](https://www.aihero.dev/getting-started-with-ralph) and [video walkthrough](https://www.youtube.com/watch?v=_IK18goX4X8)
-- **Additional tips**: [11 Tips for AI Coding with Ralph](https://www.aihero.dev/tips-for-ai-coding-with-ralph-wiggum)
+- **ralph-tui**: [subsy/ralph-tui](https://github.com/subsy/ralph-tui) - Full-featured TUI
+- **This guide based on**: [Matt Pocock's guide](https://www.aihero.dev/getting-started-with-ralph)
 
 ## License
 

@@ -35,24 +35,55 @@ This project uses the **Ralph** workflow - an AI coding loop where you (Claude) 
    - Ask about key features and requirements
    - Break their vision into small tasks (~15-30 min each)
    - Create PRD.md with prioritized task list (use `- [ ]` checkboxes)
+   - Mark tasks with 🤖 (autonomous) or 🧑 (needs human)
    - Ask if they want you to start implementing
 
 2. **If PRD.md EXISTS with INCOMPLETE tasks (has `- [ ]` items):**
    → Follow the Ralph implementation loop:
    - Read PRD.md and progress.txt
-   - Find the highest-priority incomplete task
+   - Find the highest-priority incomplete 🤖 task
    - Implement ONLY that single task
    - Run tests and type checks (MUST pass before committing)
    - Mark task complete in PRD.md (`- [x]`)
    - Append to progress.txt with timestamp
    - Commit with descriptive message
-   - Ask if user wants to continue to next task
+   - **Signal completion** (see Completion Protocol below)
 
 3. **If PRD.md is COMPLETE (all tasks are `- [x]`):**
    → Celebrate and offer next steps:
    - Congratulate the user!
    - Ask if they want to add more features
    - If yes, interview them and add new tasks to PRD.md
+
+### Completion Protocol (CRITICAL)
+
+After completing each task and committing, you MUST signal completion by outputting:
+
+```
+<promise>COMPLETE</promise>
+```
+
+This token tells the ralph-loop orchestrator that you've finished the current task.
+The orchestrator will then:
+1. Detect the completion token
+2. Check if more 🤖 tasks remain
+3. Automatically continue with the next task
+
+**Important:** Output `<promise>COMPLETE</promise>` AFTER:
+- The task is fully implemented
+- Tests pass
+- Code is committed
+- progress.txt is updated
+
+### Autonomous Mode
+
+When running under `ralph-loop`, you operate autonomously:
+- Work through 🤖 tasks sequentially without asking
+- Skip 🧑 tasks (document them in HANDOFF.md)
+- Output `<promise>COMPLETE</promise>` after each task
+- Stop only when:
+  - All 🤖 tasks are complete
+  - You encounter an error you can't resolve after 3 attempts
 
 ### Critical Rules
 
@@ -61,6 +92,7 @@ This project uses the **Ralph** workflow - an AI coding loop where you (Claude) 
 - **TYPE CHECKS MUST PASS** - Run type checks (tsc, mypy, etc.) before committing
 - **SMALL COMMITS** - Each commit = one completed task
 - **UPDATE PROGRESS** - Always append to progress.txt with what you did and when
+- **SIGNAL COMPLETION** - Always output `<promise>COMPLETE</promise>` when done
 
 ### Frontend Feedback Loop (Browser Tools)
 
