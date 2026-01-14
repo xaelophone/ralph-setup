@@ -45,6 +45,22 @@ claude                     # Tell Claude what you want to build/fix
 ralph-loop                 # Claude works through your task list
 ```
 
+### 2c. From a GitHub Issue (bridges strategic + tactical)
+
+If you plan features as GitHub Issues (recommended for teams):
+
+```bash
+cd my-project
+setup-ralph                # Initialize Ralph files
+
+ralph-gh link 42           # Link to GitHub Issue #42
+ralph-gh sync              # Create PRD.md from issue content
+# Edit PRD.md to break into atomic 🤖/🧑 tasks
+
+claude                     # Implement
+ralph-gh post              # Post progress back to the issue
+```
+
 ### 3. Check Progress
 
 Come back in the morning to find:
@@ -56,6 +72,7 @@ Come back in the morning to find:
 
 | Tool | Description |
 |------|-------------|
+| `ralph-gh` | Bridge between GitHub Issues and local Ralph files |
 | `setup-ralph` | Initializes a project with CLAUDE.md and progress.txt |
 | `ralph-loop` | Autonomous Claude runner with completion detection |
 
@@ -107,6 +124,26 @@ Remaining:   7 🤖 tasks, 3 🧑 tasks
 Current:     Implement user authentication
 ═══════════════════════════════════════════════════════════════
 ```
+
+### ralph-gh
+
+Bridges GitHub Issues (strategic planning) with local Ralph files (tactical execution):
+
+```bash
+ralph-gh link 42           # Link project to issue #42
+ralph-gh sync              # Create PRD.md from issue content
+ralph-gh post              # Post progress summary as issue comment
+ralph-gh status            # Show current link and progress
+```
+
+**The two-layer approach:**
+
+| Layer | Where | Purpose |
+|-------|-------|---------|
+| **Strategic** | GitHub Issues | Team visibility, stakeholder access, cross-project planning |
+| **Tactical** | PRD.md + progress.txt | Within-session task tracking, context recovery |
+
+This lets you keep GitHub Issues for high-level planning while using Ralph's local files for the granular task execution that Claude needs.
 
 ## For a Full TUI: ralph-tui
 

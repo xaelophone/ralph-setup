@@ -27,6 +27,7 @@ download_file() {
 
 download_file "setup-ralph"
 download_file "ralph-loop"
+download_file "ralph-gh"
 
 # Check if already in PATH
 if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
@@ -40,9 +41,15 @@ fi
 echo "✅ Ralph tools installed to $INSTALL_DIR/"
 echo "   • setup-ralph  - Initialize Ralph workflow in a project"
 echo "   • ralph-loop   - Run Claude autonomously (for overnight runs)"
+echo "   • ralph-gh     - Bridge GitHub Issues with local Ralph files"
 echo ""
 echo "Usage:"
 echo "  cd your-project"
 echo "  setup-ralph       # Initialize Ralph files"
 echo "  claude            # Manual mode"
 echo "  ralph-loop        # Autonomous mode (recommended for overnight)"
+echo ""
+echo "With GitHub Issues:"
+echo "  ralph-gh link 42  # Link to issue #42"
+echo "  ralph-gh sync     # Create PRD.md from issue"
+echo "  ralph-gh post     # Post progress as issue comment"

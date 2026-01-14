@@ -1,0 +1,391 @@
+#!/bin/bash
+# ralph-gh - Bridge between GitHub Issues and Ralph's local workflow
+#
+# This tool connects your strategic layer (GitHub Issues) with
+# your tactical layer (PRD.md + progress.txt).
+#
+# Commands:
+#   ralph-gh link <issue>     Link project to a GitHub Issue
+#   ralph-gh sync             Fetch issue and update PRD.md
+#   ralph-gh post             Post progress summary as issue comment
+#   ralph-gh status           Show current link and progress
+#
+# Prerequisites:
+#   - GitHub CLI (gh) must be installed and authenticated
+#   - Run from within a git repository
+#
+# https://github.com/xaelophone/ralph-setup
+
+set -e
+
+VERSION="1.0.0"
+LINK_FILE=".ralph-issue"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Helper Functions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+print_header() {
+    echo ""
+    echo "  ┌─────────────────────────────────────────┐"
+    echo "  │  ralph-gh v$VERSION                      │"
+    echo "  │  GitHub Issues ↔ Ralph Bridge           │"
+    echo "  └─────────────────────────────────────────┘"
+    echo ""
+}
+
+check_gh() {
+    if ! command -v gh &> /dev/null; then
+        echo "❌ GitHub CLI (gh) is not installed."
+        echo ""
+        echo "Install it:"
+        echo "  brew install gh     # macOS"
+        echo "  apt install gh      # Ubuntu/Debian"
+        echo ""
+        echo "Then authenticate:"
+        echo "  gh auth login"
+        exit 1
+    fi
+
+    if ! gh auth status &> /dev/null; then
+        echo "❌ GitHub CLI is not authenticated."
+        echo ""
+        echo "Run: gh auth login"
+        exit 1
+    fi
+}
+
+check_git_repo() {
+    if ! git rev-parse --is-inside-work-tree &> /dev/null; then
+        echo "❌ Not in a git repository."
+        echo "Run: git init"
+        exit 1
+    fi
+}
+
+get_repo() {
+    # Try to get repo from git remote
+    local remote_url
+    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
+
+    if [[ -z "$remote_url" ]]; then
+        echo "❌ No git remote 'origin' found."
+        echo "Set one with: git remote add origin <url>"
+        exit 1
+    fi
+
+    # Extract owner/repo from URL
+    # Handles: git@github.com:owner/repo.git or https://github.com/owner/repo.git
+    echo "$remote_url" | sed -E 's/.*[:/]([^/]+\/[^/]+)(\.git)?$/\1/' | sed 's/\.git$//'
+}
+
+get_linked_issue() {
+    if [[ -f "$LINK_FILE" ]]; then
+        cat "$LINK_FILE"
+    else
+        echo ""
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Commands
+# ═══════════════════════════════════════════════════════════════════════════════
+
+cmd_link() {
+    local issue_num="$1"
+
+    if [[ -z "$issue_num" ]]; then
+        echo "Usage: ralph-gh link <issue-number>"
+        echo ""
+        echo "Example: ralph-gh link 42"
+        exit 1
+    fi
+
+    check_gh
+    check_git_repo
+
+    local repo
+    repo=$(get_repo)
+
+    # Verify issue exists
+    echo "🔗 Linking to issue #$issue_num..."
+
+    if ! gh issue view "$issue_num" --repo "$repo" &> /dev/null; then
+        echo "❌ Issue #$issue_num not found in $repo"
+        exit 1
+    fi
+
+    # Save the link
+    echo "$issue_num" > "$LINK_FILE"
+
+    # Get issue title for confirmation
+    local title
+    title=$(gh issue view "$issue_num" --repo "$repo" --json title -q '.title')
+
+    echo "✅ Linked to: #$issue_num - $title"
+    echo ""
+    echo "Next steps:"
+    echo "  ralph-gh sync    # Fetch issue and create PRD.md"
+    echo "  ralph-gh post    # Post progress as issue comment"
+}
+
+cmd_sync() {
+    check_gh
+    check_git_repo
+
+    local issue_num
+    issue_num=$(get_linked_issue)
+
+    if [[ -z "$issue_num" ]]; then
+        echo "❌ No issue linked. Run: ralph-gh link <issue-number>"
+        exit 1
+    fi
+
+    local repo
+    repo=$(get_repo)
+
+    echo "📥 Fetching issue #$issue_num from $repo..."
+
+    # Fetch issue data
+    local issue_data
+    issue_data=$(gh issue view "$issue_num" --repo "$repo" --json title,body,labels)
+
+    local title body
+    title=$(echo "$issue_data" | jq -r '.title')
+    body=$(echo "$issue_data" | jq -r '.body')
+
+    # Check for existing PRD.md
+    if [[ -f "PRD.md" ]]; then
+        echo ""
+        echo "⚠️  PRD.md already exists."
+        echo -n "Overwrite with issue content? (y/N) "
+        read -r response
+        [[ ! "$response" =~ ^[Yy]$ ]] && exit 0
+    fi
+
+    # Create PRD.md from issue
+    cat > PRD.md << EOF
+# $title
+
+> Linked to: [Issue #$issue_num](https://github.com/$repo/issues/$issue_num)
+> Legend: 🤖 = AI task | 🧑 = Human task
+
+---
+
+$body
+
+---
+
+## Implementation Tasks
+
+<!--
+Break the above into atomic 15-30 min tasks.
+Mark each with 🤖 (Claude can do) or 🧑 (human required).
+Example:
+
+- [ ] 🤖 Create database schema
+- [ ] 🤖 Build API endpoint
+- [ ] 🧑 Set up production secrets
+- [ ] 🤖 Write integration tests
+-->
+
+- [ ] 🤖 TODO: Break this issue into atomic tasks
+
+EOF
+
+    echo "✅ Created PRD.md from issue #$issue_num"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit PRD.md to break the issue into atomic 🤖/🧑 tasks"
+    echo "  2. Run 'claude' or 'ralph-loop' to start implementing"
+    echo "  3. Run 'ralph-gh post' when you complete a phase"
+}
+
+cmd_post() {
+    check_gh
+    check_git_repo
+
+    local issue_num
+    issue_num=$(get_linked_issue)
+
+    if [[ -z "$issue_num" ]]; then
+        echo "❌ No issue linked. Run: ralph-gh link <issue-number>"
+        exit 1
+    fi
+
+    local repo
+    repo=$(get_repo)
+
+    # Check for progress.txt
+    if [[ ! -f "progress.txt" ]] || [[ ! -s "progress.txt" ]]; then
+        echo "❌ No progress.txt found or it's empty."
+        echo "Complete some tasks first!"
+        exit 1
+    fi
+
+    # Check for PRD.md to get task counts
+    local completed=0 total=0 remaining=0
+    if [[ -f "PRD.md" ]]; then
+        completed=$(grep -c '\- \[x\]' PRD.md 2>/dev/null || echo 0)
+        total=$(grep -c '\- \[.\]' PRD.md 2>/dev/null || echo 0)
+        remaining=$((total - completed))
+    fi
+
+    # Get recent progress entries (last 20 lines or so)
+    local recent_progress
+    recent_progress=$(tail -50 progress.txt)
+
+    # Build the comment
+    local comment
+    comment=$(cat << EOF
+## Progress Update
+
+**Status:** $completed/$total tasks complete ($remaining remaining)
+
+### Recent Progress
+
+\`\`\`
+$recent_progress
+\`\`\`
+
+### PRD Status
+
+$(if [[ -f "PRD.md" ]]; then
+    echo '```markdown'
+    grep -E '^\s*- \[.\]' PRD.md | head -20
+    echo '```'
+else
+    echo "_No PRD.md found_"
+fi)
+
+---
+_Posted by [ralph-gh](https://github.com/xaelophone/ralph-setup) at $(date '+%Y-%m-%d %H:%M')_
+EOF
+)
+
+    echo "📤 Posting progress to issue #$issue_num..."
+    echo ""
+    echo "Preview:"
+    echo "─────────────────────────────────────────"
+    echo "$comment" | head -30
+    echo "..."
+    echo "─────────────────────────────────────────"
+    echo ""
+    echo -n "Post this comment? (y/N) "
+    read -r response
+
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        echo "$comment" | gh issue comment "$issue_num" --repo "$repo" --body-file -
+        echo ""
+        echo "✅ Posted progress to issue #$issue_num"
+        echo "   https://github.com/$repo/issues/$issue_num"
+    else
+        echo "Cancelled."
+    fi
+}
+
+cmd_status() {
+    print_header
+    check_git_repo
+
+    local issue_num repo
+    issue_num=$(get_linked_issue)
+
+    if [[ -z "$issue_num" ]]; then
+        echo "📎 Not linked to any GitHub Issue"
+        echo ""
+        echo "Link with: ralph-gh link <issue-number>"
+    else
+        repo=$(get_repo)
+        local title
+        title=$(gh issue view "$issue_num" --repo "$repo" --json title -q '.title' 2>/dev/null || echo "(unable to fetch)")
+
+        echo "📎 Linked to: #$issue_num - $title"
+        echo "   https://github.com/$repo/issues/$issue_num"
+    fi
+
+    echo ""
+    echo "─────────────────────────────────────────"
+    echo ""
+
+    # PRD status
+    if [[ -f "PRD.md" ]]; then
+        local completed total ai_remaining human_remaining
+        completed=$(grep -c '\- \[x\]' PRD.md 2>/dev/null || echo 0)
+        total=$(grep -c '\- \[.\]' PRD.md 2>/dev/null || echo 0)
+        ai_remaining=$(grep -c '\- \[ \] 🤖' PRD.md 2>/dev/null || echo 0)
+        human_remaining=$(grep -c '\- \[ \] 🧑' PRD.md 2>/dev/null || echo 0)
+
+        echo "📋 PRD.md: $completed/$total tasks complete"
+        echo "   Remaining: $ai_remaining 🤖 AI tasks, $human_remaining 🧑 human tasks"
+    else
+        echo "📋 PRD.md: Not found"
+    fi
+
+    # Progress status
+    if [[ -f "progress.txt" ]] && [[ -s "progress.txt" ]]; then
+        local lines last_entry
+        lines=$(wc -l < progress.txt | tr -d ' ')
+        last_entry=$(grep '^\[' progress.txt | tail -1 | cut -c1-50)
+
+        echo ""
+        echo "📝 progress.txt: $lines lines"
+        echo "   Last: $last_entry..."
+    else
+        echo ""
+        echo "📝 progress.txt: Empty or not found"
+    fi
+
+    echo ""
+}
+
+cmd_help() {
+    print_header
+    echo "Commands:"
+    echo ""
+    echo "  ralph-gh link <issue>   Link this project to a GitHub Issue"
+    echo "  ralph-gh sync           Fetch issue content into PRD.md"
+    echo "  ralph-gh post           Post progress summary as issue comment"
+    echo "  ralph-gh status         Show current link and progress"
+    echo "  ralph-gh help           Show this help"
+    echo ""
+    echo "Workflow:"
+    echo ""
+    echo "  1. Create a GitHub Issue with your feature plan"
+    echo "  2. ralph-gh link 42          # Link to issue #42"
+    echo "  3. ralph-gh sync             # Create PRD.md from issue"
+    echo "  4. Edit PRD.md with atomic tasks"
+    echo "  5. claude / ralph-loop       # Implement"
+    echo "  6. ralph-gh post             # Update issue with progress"
+    echo ""
+    echo "This bridges your strategic layer (GitHub Issues) with"
+    echo "your tactical layer (PRD.md + progress.txt)."
+    echo ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
+case "${1:-help}" in
+    link)
+        cmd_link "$2"
+        ;;
+    sync)
+        cmd_sync
+        ;;
+    post)
+        cmd_post
+        ;;
+    status)
+        cmd_status
+        ;;
+    help|--help|-h)
+        cmd_help
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Run 'ralph-gh help' for usage."
+        exit 1
+        ;;
+esac
