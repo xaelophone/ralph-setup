@@ -111,44 +111,15 @@ func (c *CodexCLI) ParseEvent(line string) (*NormalizedEvent, error) {
 	normalized := &NormalizedEvent{
 		Timestamp: time.Now(),
 		Raw:       event,
+		Type:      EventTypeUnknown,
 	}
 
 	switch event.Type {
 	case "item.started":
-		if event.Item != nil {
-			switch event.Item.Type {
-			case "agent_message":
-				// Message starting - we'll get content on completion
-				normalized.Type = EventTypeUnknown
-			case "command_execution", "tool_call":
-				normalized.Type = EventTypeToolStart
-				normalized.ToolID = event.Item.ID
-				if event.Item.Command != nil {
-					normalized.ToolName = event.Item.Command.Name
-					normalized.ToolInput = event.Item.Command.Input
-				}
-			default:
-				normalized.Type = EventTypeUnknown
-			}
-		}
+		c.parseItemStarted(event.Item, normalized)
 
 	case "item.completed":
-		if event.Item != nil {
-			switch event.Item.Type {
-			case "agent_message":
-				normalized.Type = EventTypeMessage
-				if event.Item.Content != nil {
-					normalized.Content = event.Item.Content.Text
-				}
-			case "command_execution", "tool_call":
-				normalized.Type = EventTypeToolEnd
-				normalized.ToolID = event.Item.ID
-				normalized.Content = event.Item.Output
-				normalized.IsError = event.Item.Status == "error"
-			default:
-				normalized.Type = EventTypeUnknown
-			}
-		}
+		c.parseItemCompleted(event.Item, normalized)
 
 	case "turn.completed":
 		normalized.Type = EventTypeTurnComplete
@@ -159,14 +130,44 @@ func (c *CodexCLI) ParseEvent(line string) (*NormalizedEvent, error) {
 		if event.Error != nil {
 			normalized.Content = event.Error.Message
 		}
-
-	case "thread.started", "turn.started":
-		// Informational events, ignore
-		normalized.Type = EventTypeUnknown
-
-	default:
-		normalized.Type = EventTypeUnknown
 	}
 
 	return normalized, nil
+}
+
+// parseItemStarted handles item.started events
+func (c *CodexCLI) parseItemStarted(item *CodexItem, normalized *NormalizedEvent) {
+	if item == nil {
+		return
+	}
+
+	if item.Type == "command_execution" || item.Type == "tool_call" {
+		normalized.Type = EventTypeToolStart
+		normalized.ToolID = item.ID
+		if item.Command != nil {
+			normalized.ToolName = item.Command.Name
+			normalized.ToolInput = item.Command.Input
+		}
+	}
+}
+
+// parseItemCompleted handles item.completed events
+func (c *CodexCLI) parseItemCompleted(item *CodexItem, normalized *NormalizedEvent) {
+	if item == nil {
+		return
+	}
+
+	switch item.Type {
+	case "agent_message":
+		normalized.Type = EventTypeMessage
+		if item.Content != nil {
+			normalized.Content = item.Content.Text
+		}
+
+	case "command_execution", "tool_call":
+		normalized.Type = EventTypeToolEnd
+		normalized.ToolID = item.ID
+		normalized.Content = item.Output
+		normalized.IsError = item.Status == "error"
+	}
 }

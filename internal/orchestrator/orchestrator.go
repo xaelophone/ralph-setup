@@ -418,60 +418,6 @@ func (o *Orchestrator) runIteration() IterationResult {
 	return result
 }
 
-// processEvent handles a parsed Claude event (legacy, kept for backward compatibility)
-func (o *Orchestrator) processEvent(event ClaudeEvent) {
-	switch event.Type {
-	case "assistant":
-		if event.Message != nil {
-			o.program.Send(OutputMsg{Content: event.Message.Content, Raw: false})
-		}
-
-	case "tool_use":
-		if event.ToolUse != nil {
-			trace := SubagentTrace{
-				ID:        event.ToolUse.ID,
-				Type:      event.ToolUse.Name,
-				Status:    SubagentStatusRunning,
-				StartedAt: time.Now(),
-			}
-
-			// Extract input summary
-			if input, ok := event.ToolUse.Input["command"].(string); ok {
-				trace.Input = truncate(input, 100)
-			} else if input, ok := event.ToolUse.Input["file_path"].(string); ok {
-				trace.Input = input
-			} else if input, ok := event.ToolUse.Input["prompt"].(string); ok {
-				trace.Input = truncate(input, 100)
-			}
-
-			o.currentSubagents = append(o.currentSubagents, trace)
-			o.program.Send(SubagentMsg{Trace: trace})
-		}
-
-	case "tool_result":
-		if event.ToolResult != nil {
-			// Find and update the corresponding subagent trace
-			for i := range o.currentSubagents {
-				if o.currentSubagents[i].ID == event.ToolResult.ToolUseID {
-					now := time.Now()
-					o.currentSubagents[i].EndedAt = &now
-					o.currentSubagents[i].Duration = now.Sub(o.currentSubagents[i].StartedAt)
-					o.currentSubagents[i].Output = truncate(event.ToolResult.Content, 200)
-
-					if event.ToolResult.IsError {
-						o.currentSubagents[i].Status = SubagentStatusError
-					} else {
-						o.currentSubagents[i].Status = SubagentStatusComplete
-					}
-
-					o.program.Send(SubagentMsg{Trace: o.currentSubagents[i]})
-					break
-				}
-			}
-		}
-	}
-}
-
 // processNormalizedEvent handles a normalized CLI event (works with any CLI backend)
 func (o *Orchestrator) processNormalizedEvent(event *cli.NormalizedEvent) {
 	switch event.Type {
@@ -484,45 +430,57 @@ func (o *Orchestrator) processNormalizedEvent(event *cli.NormalizedEvent) {
 			Type:      event.ToolName,
 			Status:    SubagentStatusRunning,
 			StartedAt: event.Timestamp,
+			Input:     extractToolInputSummary(event.ToolInput),
 		}
-
-		// Extract input summary from tool input
-		if event.ToolInput != nil {
-			if input, ok := event.ToolInput["command"].(string); ok {
-				trace.Input = truncate(input, 100)
-			} else if input, ok := event.ToolInput["file_path"].(string); ok {
-				trace.Input = input
-			} else if input, ok := event.ToolInput["prompt"].(string); ok {
-				trace.Input = truncate(input, 100)
-			}
-		}
-
 		o.currentSubagents = append(o.currentSubagents, trace)
 		o.program.Send(SubagentMsg{Trace: trace})
 
 	case cli.EventTypeToolEnd:
-		// Find and update the corresponding subagent trace
-		for i := range o.currentSubagents {
-			if o.currentSubagents[i].ID == event.ToolID {
-				now := time.Now()
-				o.currentSubagents[i].EndedAt = &now
-				o.currentSubagents[i].Duration = now.Sub(o.currentSubagents[i].StartedAt)
-				o.currentSubagents[i].Output = truncate(event.Content, 200)
-
-				if event.IsError {
-					o.currentSubagents[i].Status = SubagentStatusError
-				} else {
-					o.currentSubagents[i].Status = SubagentStatusComplete
-				}
-
-				o.program.Send(SubagentMsg{Trace: o.currentSubagents[i]})
-				break
-			}
-		}
+		o.completeSubagent(event.ToolID, event.Content, event.IsError)
 
 	case cli.EventTypeError:
 		o.program.Send(OutputMsg{Content: "[error] " + event.Content, Raw: true})
 	}
+}
+
+// completeSubagent marks a subagent trace as complete
+func (o *Orchestrator) completeSubagent(toolID, output string, isError bool) {
+	for i := range o.currentSubagents {
+		if o.currentSubagents[i].ID == toolID {
+			now := time.Now()
+			o.currentSubagents[i].EndedAt = &now
+			o.currentSubagents[i].Duration = now.Sub(o.currentSubagents[i].StartedAt)
+			o.currentSubagents[i].Output = truncate(output, 200)
+
+			if isError {
+				o.currentSubagents[i].Status = SubagentStatusError
+			} else {
+				o.currentSubagents[i].Status = SubagentStatusComplete
+			}
+
+			o.program.Send(SubagentMsg{Trace: o.currentSubagents[i]})
+			return
+		}
+	}
+}
+
+// extractToolInputSummary extracts a human-readable summary from tool input
+func extractToolInputSummary(input map[string]interface{}) string {
+	if input == nil {
+		return ""
+	}
+
+	// Check common input fields in priority order
+	if cmd, ok := input["command"].(string); ok {
+		return truncate(cmd, 100)
+	}
+	if path, ok := input["file_path"].(string); ok {
+		return path
+	}
+	if prompt, ok := input["prompt"].(string); ok {
+		return truncate(prompt, 100)
+	}
+	return ""
 }
 
 // buildPrompt creates the prompt for Claude

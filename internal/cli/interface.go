@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/xaelophone/ralph-setup/internal/config"
@@ -70,28 +71,18 @@ func NewCLIRunner(cfg config.CLIConfig) CLIRunner {
 	}
 }
 
+// Completion tokens used to signal task state
+const (
+	CompletionToken = "<promise>COMPLETE</promise>"
+	BlockedToken    = "<promise>BLOCKED</promise>"
+)
+
 // ContainsCompletionToken checks if text contains the completion token
 func ContainsCompletionToken(text string) bool {
-	return containsToken(text, "<promise>COMPLETE</promise>")
+	return strings.Contains(text, CompletionToken)
 }
 
 // ContainsBlockedToken checks if text contains the blocked token
 func ContainsBlockedToken(text string) bool {
-	return containsToken(text, "<promise>BLOCKED</promise>")
-}
-
-func containsToken(text, token string) bool {
-	return len(text) >= len(token) && (text == token ||
-		(len(text) > len(token) && (text[:len(token)] == token ||
-		text[len(text)-len(token):] == token ||
-		contains(text, token))))
-}
-
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(text, BlockedToken)
 }

@@ -13,12 +13,12 @@ import (
 )
 
 var (
-	version          = "2.0.0"
-	monitorOnly      bool
-	orchestratorMode bool
-	maxIterations    int
-	cliBackend       string
-	cliModel         string
+	version       = "2.0.0"
+	monitorOnly   bool
+	legacyMode    bool
+	maxIterations int
+	cliBackend    string
+	cliModel      string
 )
 
 func main() {
@@ -68,13 +68,10 @@ Configuration (precedence: flags > env > .ralph-config.json > defaults):
 	}
 
 	rootCmd.Flags().BoolVar(&monitorOnly, "monitor-only", false, "Only monitor files, don't run AI")
-	rootCmd.Flags().BoolVar(&orchestratorMode, "legacy", false, "Use legacy PTY mode instead of orchestrator")
+	rootCmd.Flags().BoolVar(&legacyMode, "legacy", false, "Use legacy PTY mode instead of orchestrator")
 	rootCmd.Flags().IntVar(&maxIterations, "max-iterations", 100, "Maximum iterations in orchestrator mode")
 	rootCmd.Flags().StringVarP(&cliBackend, "cli", "c", "", "CLI backend: claude (default) or codex")
 	rootCmd.Flags().StringVarP(&cliModel, "model", "m", "", "Model to use (e.g., claude-sonnet-4-20250514, gpt-4o)")
-
-	// Invert the flag meaning (--legacy means NOT orchestrator)
-	orchestratorMode = true
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -100,8 +97,7 @@ func runRwatch(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 	}
 
-	// Check for legacy flag
-	legacyMode, _ := cmd.Flags().GetBool("legacy")
+	// Determine mode: orchestrator (default), legacy PTY, or monitor-only
 	useOrchestrator := !legacyMode && !monitorOnly
 
 	// Create the model with all options
