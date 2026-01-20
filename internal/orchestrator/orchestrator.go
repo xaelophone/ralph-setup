@@ -15,6 +15,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
+	"github.com/xaelophone/ralph-setup/internal/cli"
+	"github.com/xaelophone/ralph-setup/internal/config"
 )
 
 // Config holds orchestrator configuration
@@ -25,6 +27,7 @@ type Config struct {
 	LogDir        string
 	SessionFile   string
 	LockFile      string
+	CLIConfig     config.CLIConfig // CLI backend configuration
 }
 
 // DefaultConfig returns default orchestrator configuration
@@ -36,6 +39,7 @@ func DefaultConfig() Config {
 		LogDir:        ".ralph-logs",
 		SessionFile:   ".ralph-session.json",
 		LockFile:      ".ralph.lock",
+		CLIConfig:     config.DefaultCLIConfig(),
 	}
 }
 
@@ -45,6 +49,9 @@ type Orchestrator struct {
 	program *tea.Program
 	session *Session
 	mu      sync.Mutex
+
+	// CLI backend
+	cliRunner cli.CLIRunner
 
 	// Current iteration state
 	currentSubagents []SubagentTrace
@@ -60,9 +67,10 @@ type Orchestrator struct {
 // New creates a new orchestrator
 func New(config Config, program *tea.Program) *Orchestrator {
 	return &Orchestrator{
-		config:  config,
-		program: program,
-		stopCh:  make(chan struct{}),
+		config:    config,
+		program:   program,
+		stopCh:    make(chan struct{}),
+		cliRunner: cli.NewCLIRunner(config.CLIConfig),
 	}
 }
 
@@ -319,12 +327,8 @@ func (o *Orchestrator) runIteration() IterationResult {
 	}
 	defer logWriter.Close()
 
-	// Run Claude with streaming JSON output
-	o.cmd = exec.Command("claude",
-		"--dangerously-skip-permissions",
-		"--output-format", "stream-json",
-		"--verbose",
-	)
+	// Run CLI with streaming JSON output
+	o.cmd = o.cliRunner.BuildCommand(prompt, o.session.WorkingDir)
 
 	// Set up pipes
 	stdin, _ := o.cmd.StdinPipe()
@@ -358,17 +362,16 @@ func (o *Orchestrator) runIteration() IterationResult {
 			line := scanner.Text()
 			logWriter.WriteString(line + "\n")
 
-			// Try to parse as JSON
-			var event ClaudeEvent
-			if err := json.Unmarshal([]byte(line), &event); err == nil {
-				o.processEvent(event)
+			// Try to parse using CLI runner
+			if normalizedEvent, err := o.cliRunner.ParseEvent(line); err == nil && normalizedEvent != nil {
+				o.processNormalizedEvent(normalizedEvent)
 
 				// Check for completion tokens in content
-				if event.Type == "assistant" && event.Message != nil {
-					if strings.Contains(event.Message.Content, CompletionTokenComplete) {
+				if normalizedEvent.Type == cli.EventTypeMessage {
+					if cli.ContainsCompletionToken(normalizedEvent.Content) {
 						completionDetected = true
 					}
-					if strings.Contains(event.Message.Content, CompletionTokenBlocked) {
+					if cli.ContainsBlockedToken(normalizedEvent.Content) {
 						blockedDetected = true
 					}
 				}
@@ -377,10 +380,10 @@ func (o *Orchestrator) runIteration() IterationResult {
 				o.program.Send(OutputMsg{Content: line, Raw: true})
 
 				// Check raw output for tokens
-				if strings.Contains(line, CompletionTokenComplete) {
+				if cli.ContainsCompletionToken(line) {
 					completionDetected = true
 				}
-				if strings.Contains(line, CompletionTokenBlocked) {
+				if cli.ContainsBlockedToken(line) {
 					blockedDetected = true
 				}
 			}
@@ -415,7 +418,7 @@ func (o *Orchestrator) runIteration() IterationResult {
 	return result
 }
 
-// processEvent handles a parsed Claude event
+// processEvent handles a parsed Claude event (legacy, kept for backward compatibility)
 func (o *Orchestrator) processEvent(event ClaudeEvent) {
 	switch event.Type {
 	case "assistant":
@@ -466,6 +469,59 @@ func (o *Orchestrator) processEvent(event ClaudeEvent) {
 				}
 			}
 		}
+	}
+}
+
+// processNormalizedEvent handles a normalized CLI event (works with any CLI backend)
+func (o *Orchestrator) processNormalizedEvent(event *cli.NormalizedEvent) {
+	switch event.Type {
+	case cli.EventTypeMessage:
+		o.program.Send(OutputMsg{Content: event.Content, Raw: false})
+
+	case cli.EventTypeToolStart:
+		trace := SubagentTrace{
+			ID:        event.ToolID,
+			Type:      event.ToolName,
+			Status:    SubagentStatusRunning,
+			StartedAt: event.Timestamp,
+		}
+
+		// Extract input summary from tool input
+		if event.ToolInput != nil {
+			if input, ok := event.ToolInput["command"].(string); ok {
+				trace.Input = truncate(input, 100)
+			} else if input, ok := event.ToolInput["file_path"].(string); ok {
+				trace.Input = input
+			} else if input, ok := event.ToolInput["prompt"].(string); ok {
+				trace.Input = truncate(input, 100)
+			}
+		}
+
+		o.currentSubagents = append(o.currentSubagents, trace)
+		o.program.Send(SubagentMsg{Trace: trace})
+
+	case cli.EventTypeToolEnd:
+		// Find and update the corresponding subagent trace
+		for i := range o.currentSubagents {
+			if o.currentSubagents[i].ID == event.ToolID {
+				now := time.Now()
+				o.currentSubagents[i].EndedAt = &now
+				o.currentSubagents[i].Duration = now.Sub(o.currentSubagents[i].StartedAt)
+				o.currentSubagents[i].Output = truncate(event.Content, 200)
+
+				if event.IsError {
+					o.currentSubagents[i].Status = SubagentStatusError
+				} else {
+					o.currentSubagents[i].Status = SubagentStatusComplete
+				}
+
+				o.program.Send(SubagentMsg{Trace: o.currentSubagents[i]})
+				break
+			}
+		}
+
+	case cli.EventTypeError:
+		o.program.Send(OutputMsg{Content: "[error] " + event.Content, Raw: true})
 	}
 }
 

@@ -44,6 +44,11 @@ MAX_ITERATIONS=100        # Maximum loop iterations before stopping
 RESTART_DELAY=3           # Seconds to wait between iterations
 CONTEXT_LINES=20          # Lines of progress.txt to inject into prompt
 
+# CLI Configuration (can be overridden by flags, env vars, or config file)
+# Precedence: flags > env > config file > defaults
+CLI_BACKEND="${RALPH_CLI:-claude}"  # CLI backend: claude or codex
+CLI_MODEL="${RALPH_MODEL:-}"        # Model to use (optional)
+
 # File paths
 PRD_FILE="PRD.md"
 PROGRESS_FILE="progress.txt"
@@ -51,9 +56,10 @@ HANDOFF_FILE="HANDOFF.md"
 SESSION_FILE=".ralph-session.json"
 LOCK_FILE=".ralph.lock"
 LOG_DIR=".ralph-logs"
+CONFIG_FILE=".ralph-config.json"
 
 # The magic token that signals task completion
-# Claude outputs this after finishing a task, and we detect it to continue
+# AI outputs this after finishing a task, and we detect it to continue
 COMPLETION_TOKEN="<promise>COMPLETE</promise>"
 BLOCKED_TOKEN="<promise>BLOCKED</promise>"
 
@@ -83,6 +89,63 @@ timestamp_short() { date '+%Y-%m-%d %H:%M'; }
 # Check if a process is still running (used for stale lock detection)
 is_process_running() {
     kill -0 "$1" 2>/dev/null
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# CLI Configuration
+#───────────────────────────────────────────────────────────────────────────────
+# Load CLI configuration from .ralph-config.json if present
+# This runs after argument parsing to allow flags to override
+
+load_cli_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # Only use config file values if not already set by flags/env
+        if [[ -z "$CLI_BACKEND_FLAG" ]]; then
+            local config_cli
+            config_cli=$(grep '"cli"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+            [[ -n "$config_cli" ]] && CLI_BACKEND="$config_cli"
+        fi
+        if [[ -z "$CLI_MODEL_FLAG" ]]; then
+            local config_model
+            config_model=$(grep '"model"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*: *"\([^"]*\)".*/\1/')
+            [[ -n "$config_model" ]] && CLI_MODEL="$config_model"
+        fi
+    fi
+}
+
+# Build the CLI command based on the selected backend
+get_cli_command() {
+    local cmd_args=""
+
+    case "$CLI_BACKEND" in
+        claude)
+            cmd_args="claude --dangerously-skip-permissions"
+            [[ -n "$CLI_MODEL" ]] && cmd_args="$cmd_args --model $CLI_MODEL"
+            ;;
+        codex)
+            cmd_args="codex exec --dangerously-bypass-approvals-and-sandbox"
+            [[ -n "$CLI_MODEL" ]] && cmd_args="$cmd_args --model $CLI_MODEL"
+            ;;
+        *)
+            log_error "Unknown CLI backend: $CLI_BACKEND"
+            log_info "Supported backends: claude, codex"
+            exit 1
+            ;;
+    esac
+
+    echo "$cmd_args"
+}
+
+# Validate CLI backend
+validate_cli_backend() {
+    case "$CLI_BACKEND" in
+        claude|codex) return 0 ;;
+        *)
+            log_error "Invalid CLI backend: $CLI_BACKEND"
+            log_info "Supported backends: claude, codex"
+            exit 1
+            ;;
+    esac
 }
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -299,12 +362,12 @@ PROMPT_EOF
 }
 
 #───────────────────────────────────────────────────────────────────────────────
-# Claude Execution
+# CLI Execution
 #───────────────────────────────────────────────────────────────────────────────
-# We run Claude and parse its output in real-time looking for completion tokens.
+# We run the AI CLI and parse its output in real-time looking for completion tokens.
 # Output is displayed AND logged to .ralph-logs/iteration-N.log
 
-run_claude_iteration() {
+run_cli_iteration() {
     local iteration=$1
     local prompt
     prompt=$(build_prompt "$iteration")
@@ -312,8 +375,13 @@ run_claude_iteration() {
 
     mkdir -p "$LOG_DIR"
 
+    # Clean up any stale marker files from previous iterations
+    rm -f "${log_file}.complete" "${log_file}.blocked" "${log_file}.error"
+
+    local cli_name
+    cli_name=$(echo "$CLI_BACKEND" | tr '[:lower:]' '[:upper:]')
     echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
-    echo -e "${MAGENTA}CLAUDE OUTPUT (Iteration $iteration)${NC}"
+    echo -e "${MAGENTA}${cli_name} OUTPUT (Iteration $iteration)${NC}"
     echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
 
     # Create named pipe for real-time output parsing
@@ -327,16 +395,22 @@ run_claude_iteration() {
             echo "$line"                          # Display
             echo "$line" >> "$log_file"           # Log
 
-            # Check for completion tokens
+            # Check for completion tokens (only if no error detected)
             [[ "$line" == *"$COMPLETION_TOKEN"* ]] && touch "${log_file}.complete"
             [[ "$line" == *"$BLOCKED_TOKEN"* ]] && touch "${log_file}.blocked"
+
+            # Check for API errors (marks iteration as failed)
+            [[ "$line" == *'"error":'* ]] && touch "${log_file}.error"
+            [[ "$line" == *'ERROR:'* ]] && touch "${log_file}.error"
         done < "$pipe"
     ) &
     local parser_pid=$!
 
-    # Run Claude with prompt via stdin (avoids shell escaping issues)
+    # Run CLI with prompt via stdin (avoids shell escaping issues)
+    local cli_cmd
+    cli_cmd=$(get_cli_command)
     set +e
-    echo "$prompt" | claude --dangerously-skip-permissions > "$pipe" 2>&1
+    echo "$prompt" | $cli_cmd > "$pipe" 2>&1
     local exit_code=$?
     set -e
 
@@ -345,6 +419,13 @@ run_claude_iteration() {
     rm -f "$pipe"
 
     echo -e "${DIM}─────────────────────────────────────────────────────────────${NC}"
+
+    # Check for API errors first (takes precedence over completion tokens)
+    if [[ -f "${log_file}.error" ]]; then
+        rm -f "${log_file}.error" "${log_file}.complete" "${log_file}.blocked"
+        log_error "API error detected - iteration failed"
+        return 1  # Failed due to error
+    fi
 
     # Return result based on token detection
     if [[ -f "${log_file}.complete" ]]; then
@@ -396,7 +477,8 @@ show_banner() {
   ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝  ╚═╝
 BANNER
     echo -e "${NC}"
-    echo -e "  ${DIM}Autonomous Claude Loop v$VERSION${NC}"
+    echo -e "  ${DIM}Autonomous AI Loop v$VERSION${NC}"
+    echo -e "  ${DIM}CLI: ${CLI_BACKEND}${CLI_MODEL:+ (model: $CLI_MODEL)}${NC}"
     echo -e "  ${DIM}Real-time completion detection enabled${NC}"
     echo ""
 }
@@ -469,27 +551,53 @@ trap cleanup SIGINT SIGTERM
 #───────────────────────────────────────────────────────────────────────────────
 
 RESUME_MODE=false
+CLI_BACKEND_FLAG=""
+CLI_MODEL_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --max-iterations) MAX_ITERATIONS="$2"; shift 2 ;;
         --delay) RESTART_DELAY="$2"; shift 2 ;;
+        --cli|-c)
+            CLI_BACKEND="$2"
+            CLI_BACKEND_FLAG="$2"
+            shift 2
+            ;;
+        --model|-m)
+            CLI_MODEL="$2"
+            CLI_MODEL_FLAG="$2"
+            shift 2
+            ;;
         --resume) RESUME_MODE=true; shift ;;
         --status) show_session_status; exit 0 ;;
         --help|-h)
             cat << HELP
-ralph-loop v$VERSION - Autonomous Claude Runner
+ralph-loop v$VERSION - Autonomous AI Runner
 
 Usage: ralph-loop [options]
 
 Options:
+  --cli, -c BACKEND    CLI backend: claude (default) or codex
+  --model, -m MODEL    Model to use (e.g., claude-sonnet-4-20250514, gpt-4o)
   --max-iterations N   Maximum iterations (default: 100)
   --delay N            Seconds between restarts (default: 3)
   --resume             Resume a crashed session
   --status             Show current session status
   --help, -h           Show this help
 
+CLI Backends:
+  claude  Claude Code CLI (default)
+          Uses: claude --dangerously-skip-permissions
+
+  codex   OpenAI Codex CLI
+          Uses: codex exec --dangerously-bypass-approvals-and-sandbox
+
+Configuration (precedence: flags > env > .ralph-config.json > defaults):
+  Environment: RALPH_CLI, RALPH_MODEL
+  File:        .ralph-config.json {"cli": "codex", "model": "gpt-4o"}
+
 Features:
+  • Multi-CLI support (Claude, Codex)
   • Real-time completion detection (<promise>COMPLETE</promise>)
   • Session persistence with crash recovery
   • Cross-iteration context injection
@@ -501,13 +609,25 @@ The loop continues until:
   • Max iterations reached
   • You press Ctrl+C
 
-For a full-featured TUI, see: ralph-tui (bun install -g ralph-tui)
+Examples:
+  ralph-loop                          # Use Claude (default)
+  ralph-loop --cli codex              # Use OpenAI Codex
+  ralph-loop --cli claude --model claude-sonnet-4-20250514
+  RALPH_CLI=codex ralph-loop          # Use env var
+
+For a full-featured TUI, see: rwatch
 HELP
             exit 0
             ;;
         *) log_error "Unknown option: $1"; echo "Use --help for usage"; exit 1 ;;
     esac
 done
+
+# Load config file (if present) - flags/env take precedence
+load_cli_config
+
+# Validate CLI backend
+validate_cli_backend
 
 #───────────────────────────────────────────────────────────────────────────────
 # Main Loop
@@ -568,7 +688,7 @@ main() {
         log_iteration "$iteration" "started" "$current_task"
 
         # Run Claude and detect completion
-        run_claude_iteration "$iteration"
+        run_cli_iteration "$iteration"
         local result=$?
 
         case $result in
