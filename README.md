@@ -28,7 +28,9 @@ git init
 setup-ralph                # Creates CLAUDE.md + progress.txt
 claude                     # Claude will interview you and create PRD.md
 # Once PRD.md exists with tasks:
-ralph-loop                 # Run autonomously overnight
+ralph-loop                 # Run autonomously overnight (uses Claude by default)
+# Or with Codex:
+ralph-loop --cli codex     # Use OpenAI Codex instead
 ```
 
 ### 2b. Existing Project (add Ralph to existing code)
@@ -74,7 +76,8 @@ Come back in the morning to find:
 |------|-------------|
 | `ralph-gh` | Bridge between GitHub Issues and local Ralph files |
 | `setup-ralph` | Initializes a project with CLAUDE.md and progress.txt |
-| `ralph-loop` | Autonomous Claude runner with completion detection |
+| `ralph-loop` | Autonomous AI runner with completion detection (supports Claude & Codex) |
+| `rwatch` | Go TUI for ralph-loop with real-time monitoring (optional) |
 
 ### setup-ralph
 
@@ -89,21 +92,28 @@ setup-ralph
 
 ### ralph-loop
 
-Runs Claude autonomously with real-time completion detection:
+Runs AI coding agents autonomously with real-time completion detection. Supports multiple CLI backends:
 
 ```bash
+# Basic usage (defaults to Claude)
 ralph-loop                    # Run with defaults
 ralph-loop --max-iterations 5 # Limit iterations
 ralph-loop --resume           # Resume crashed session
 ralph-loop --status           # Show session status
+
+# CLI backend selection
+ralph-loop --cli claude       # Use Claude Code (default)
+ralph-loop --cli codex        # Use OpenAI Codex
+ralph-loop --cli codex --model gpt-5.2-codex  # Specify model
 ```
 
 **Key features:**
-- 🔄 Automatic restart when Claude's context fills up
+- 🔄 Automatic restart when context fills up
 - ✅ Detects `<promise>COMPLETE</promise>` token to continue to next task
 - 💾 Session persistence with crash recovery
 - 📝 Cross-iteration context injection
 - 🤖 Skips human tasks (🧑), works only on AI tasks (🤖)
+- 🔌 Multi-CLI support (Claude Code, OpenAI Codex)
 
 **Output example:**
 ```
@@ -174,7 +184,7 @@ ralph-tui
 | Headless/CI, minimal dependencies | `ralph-loop` |
 | Interactive development, fancy UI | `ralph-tui` |
 
-> **Note:** The experimental `rwatch` Go code is still in this repo under `cmd/rwatch/` and `internal/` if you want to build your own native TUI. Run `make build` to compile it.
+> **Note:** The experimental `rwatch` Go TUI is still in this repo under `cmd/rwatch/` and `internal/`. It supports both Claude and Codex backends. Run `make build` to compile it, then use `rwatch --cli codex` for Codex support.
 
 ## Task Markers
 
@@ -263,6 +273,42 @@ For best results running overnight:
 3. Run `ralph-loop` or `ralph-tui`
 4. Check HANDOFF.md in the morning for blocked/human tasks
 
+## CLI Configuration
+
+Ralph supports multiple AI CLI backends. Configure which one to use via:
+
+**1. Command-line flags (highest priority):**
+```bash
+ralph-loop --cli codex --model gpt-5.2-codex
+rwatch --cli claude --model claude-sonnet-4-20250514
+```
+
+**2. Environment variables:**
+```bash
+export RALPH_CLI=codex
+export RALPH_MODEL=gpt-5.2-codex
+ralph-loop
+```
+
+**3. Project config file (`.ralph-config.json`):**
+```json
+{
+  "cli": "codex",
+  "model": "gpt-5.2-codex"
+}
+```
+
+**Supported backends:**
+
+| Backend | CLI Command | Description |
+|---------|-------------|-------------|
+| `claude` | Claude Code | Anthropic's Claude (default) |
+| `codex` | OpenAI Codex | OpenAI's Codex CLI |
+
+**Prerequisites:**
+- Claude: `npm install -g @anthropic-ai/claude-code`
+- Codex: `npm install -g @openai/codex`
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -271,6 +317,8 @@ For best results running overnight:
 | "Another ralph-loop running" | Delete `.ralph.lock` or use `--resume` |
 | Claude doesn't complete tasks | Add completion protocol to CLAUDE.md |
 | Tasks too big | Ask Claude to "break this down into smaller tasks" |
+| "Invalid CLI backend" | Use `claude` or `codex` as the backend value |
+| Codex not found | Install with `npm install -g @openai/codex` |
 
 ## Credits
 
